@@ -1,0 +1,10 @@
+build/
+build-*/
+*.o
+*.obj
+*.exe
+*.out
+compile_commands.json
+.cache/
+.vscode/
+.idea/
