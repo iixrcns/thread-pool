@@ -25,6 +25,18 @@ void check(bool cond, const char* expr, const char* file, int line) {
 
 #define CHECK(cond) check((cond), #cond, __FILE__, __LINE__)
 
+// Polls until the predicate holds or a timeout passes. Keeps the cancellation
+// tests deterministic without sleeping for a fixed, fragile duration.
+template <typename Pred>
+bool wait_until(Pred pred, int timeout_ms = 2000) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return pred();
+}
+
 void run(const char* name, void (*fn)()) {
     int before = g_failures;
     std::printf("%-34s", name);
@@ -129,9 +141,14 @@ void pool_propagates_exception() {
     auto f = pool.enqueue([]() -> int {
         throw std::runtime_error("boom");
     });
+    // Retain the shared state on this thread. A plain future::get() drops the
+    // consumer's reference, leaving a worker to tear down the state (and the
+    // exception object inside it) concurrently with this read; share() keeps it
+    // alive until we are done.
+    std::shared_future<int> sf = f.share();
     bool caught = false;
     try {
-        f.get();
+        sf.get();
     } catch (const std::runtime_error& e) {
         caught = std::string(e.what()) == "boom";
     }
@@ -208,6 +225,64 @@ void pool_concurrent_enqueue() {
     CHECK(counter.load() == 1000);
 }
 
+void pool_unknown_task_id() {
+    ThreadPool pool(2);
+    CHECK(pool.get_status(999999) == TaskStatus::Unknown);
+    CHECK(!pool.cancel(999999));
+}
+
+void pool_cancel_queued_task() {
+    ThreadPool pool(1);  // single worker so we can occupy it deliberately
+    std::atomic<bool> blocker_started{false};
+    std::atomic<bool> release{false};
+    std::atomic<bool> ran{false};
+
+    // Occupy the only worker until we say otherwise.
+    pool.enqueue([&] {
+        blocker_started = true;
+        while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    CHECK(wait_until([&] { return blocker_started.load(); }));
+
+    TaskId id = pool.enqueue_cancellable([&] { ran = true; });
+    CHECK(pool.get_status(id) == TaskStatus::Queued);
+    CHECK(pool.cancel(id));
+    CHECK(pool.get_status(id) == TaskStatus::Cancelled);
+
+    release = true;
+    // Give the worker a moment to drain the (skipped) cancelled task.
+    CHECK(wait_until([&] { return pool.pending() == 0; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(!ran.load());
+}
+
+void pool_cannot_cancel_running_task() {
+    ThreadPool pool(2);
+    std::atomic<bool> running{false};
+    std::atomic<bool> release{false};
+
+    TaskId id = pool.enqueue_cancellable([&] {
+        running = true;
+        while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    CHECK(wait_until([&] { return running.load(); }));
+
+    CHECK(!pool.cancel(id));
+    CHECK(pool.get_status(id) == TaskStatus::Running);
+
+    release = true;
+    CHECK(wait_until([&] { return pool.get_status(id) == TaskStatus::Completed; }));
+}
+
+void pool_status_completed_and_failed() {
+    ThreadPool pool(2);
+    TaskId ok = pool.enqueue_cancellable([] {});
+    TaskId bad = pool.enqueue_cancellable([] { throw std::runtime_error("x"); });
+
+    CHECK(wait_until([&] { return pool.get_status(ok) == TaskStatus::Completed; }));
+    CHECK(wait_until([&] { return pool.get_status(bad) == TaskStatus::Failed; }));
+}
+
 }  // namespace
 
 int main() {
@@ -226,6 +301,11 @@ int main() {
     run("pool_drains_on_destruction", pool_drains_on_destruction);
     run("pool_stress_100k", pool_stress_100k);
     run("pool_concurrent_enqueue", pool_concurrent_enqueue);
+
+    run("pool_unknown_task_id", pool_unknown_task_id);
+    run("pool_cancel_queued_task", pool_cancel_queued_task);
+    run("pool_cannot_cancel_running_task", pool_cannot_cancel_running_task);
+    run("pool_status_completed_and_failed", pool_status_completed_and_failed);
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -8,6 +8,13 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Optional: -DSANITIZE=thread (or address, undefined) instruments every target.
+# Must be set before the targets are defined to take effect.
+if(SANITIZE)
+    add_compile_options(-fsanitize=${SANITIZE} -g)
+    add_link_options(-fsanitize=${SANITIZE})
+endif()
+
 find_package(Threads REQUIRED)
 
 # The queue is header-only; only the pool has a translation unit.
@@ -25,8 +32,5 @@ add_test(NAME thread_pool_tests COMMAND thread_pool_tests)
 add_executable(benchmark bench/benchmark.cpp)
 target_link_libraries(benchmark PRIVATE thread_pool)
 
-# Optional: -DSANITIZE=thread (or address) to build everything with a sanitizer.
-if(SANITIZE)
-    add_compile_options(-fsanitize=${SANITIZE} -g)
-    add_link_options(-fsanitize=${SANITIZE})
-endif()
+add_executable(benchmark_comprehensive bench/benchmark_comprehensive.cpp)
+target_link_libraries(benchmark_comprehensive PRIVATE thread_pool)
