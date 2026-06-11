@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/benchmark_comprehensive.dir/link.d CMakeFiles/benchmark_comprehensive.dir/bench/benchmark_comprehensive.cpp.o -o benchmark_comprehensive  libthread_pool.a

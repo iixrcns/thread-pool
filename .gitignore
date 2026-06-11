@@ -9,3 +9,5 @@ compile_commands.json
 .vscode/
 .idea/
 .idea/
+.idea/
+benchmark_results.csv

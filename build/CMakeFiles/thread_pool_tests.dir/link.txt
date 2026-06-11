@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/thread_pool_tests.dir/link.d CMakeFiles/thread_pool_tests.dir/tests/test_thread_pool.cpp.o -o thread_pool_tests  libthread_pool.a
