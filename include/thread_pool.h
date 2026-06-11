@@ -36,6 +36,10 @@ const char* to_string(TaskStatus status);
 // caller through that future. The destructor drains all pending work before
 // joining, so no submitted task is silently dropped.
 //
+// A task can be given a Priority; higher-priority work is dispatched first, and
+// tasks of equal priority run in submission order. The plain enqueue() overload
+// runs at Priority::Normal.
+//
 // enqueue_cancellable() is for work that might need to be called off. It
 // returns a TaskId; cancel(id) drops the task if no worker has claimed it yet,
 // and get_status(id) reports where it is in its lifecycle.
@@ -49,6 +53,11 @@ public:
 
     template <typename F, typename... Args>
     auto enqueue(F&& f, Args&&... args)
+        -> std::future<std::invoke_result_t<F, Args...>>;
+
+    // Same as enqueue() but dispatched at the given priority.
+    template <typename F, typename... Args>
+    auto enqueue(Priority priority, F&& f, Args&&... args)
         -> std::future<std::invoke_result_t<F, Args...>>;
 
     // Submit a task that can be cancelled before it starts running.
@@ -85,6 +94,13 @@ private:
 template <typename F, typename... Args>
 auto ThreadPool::enqueue(F&& f, Args&&... args)
     -> std::future<std::invoke_result_t<F, Args...>> {
+    return enqueue(Priority::Normal, std::forward<F>(f),
+                   std::forward<Args>(args)...);
+}
+
+template <typename F, typename... Args>
+auto ThreadPool::enqueue(Priority priority, F&& f, Args&&... args)
+    -> std::future<std::invoke_result_t<F, Args...>> {
     using Result = std::invoke_result_t<F, Args...>;
 
     // packaged_task is move-only, but std::function needs a copyable target,
@@ -93,7 +109,7 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
     auto task = std::make_shared<std::packaged_task<Result()>>(std::move(bound));
 
     std::future<Result> result = task->get_future();
-    tasks_.push([task] { (*task)(); });
+    tasks_.push(priority, [task] { (*task)(); });
     return result;
 }
 

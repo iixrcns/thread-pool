@@ -1,0 +1,7 @@
+/home/iixrcns/Загрузки/thread-pool/build/CMakeFiles/thread_pool.dir
+/home/iixrcns/Загрузки/thread-pool/build/CMakeFiles/thread_pool_tests.dir
+/home/iixrcns/Загрузки/thread-pool/build/CMakeFiles/benchmark.dir
+/home/iixrcns/Загрузки/thread-pool/build/CMakeFiles/benchmark_comprehensive.dir
+/home/iixrcns/Загрузки/thread-pool/build/CMakeFiles/test.dir
+/home/iixrcns/Загрузки/thread-pool/build/CMakeFiles/edit_cache.dir
+/home/iixrcns/Загрузки/thread-pool/build/CMakeFiles/rebuild_cache.dir

@@ -89,6 +89,33 @@ void queue_blocks_until_pushed() {
     CHECK(got.load());
 }
 
+void queue_orders_by_priority() {
+    BlockingQueue<int> q;
+    q.push(Priority::Low, 1);
+    q.push(Priority::Critical, 2);
+    q.push(Priority::Normal, 3);
+    q.push(Priority::Critical, 4);  // same level as 2, queued later
+    q.push(Priority::High, 5);
+
+    // Critical first (2 before 4 by submission order), then High, Normal, Low.
+    CHECK(q.pop().value() == 2);
+    CHECK(q.pop().value() == 4);
+    CHECK(q.pop().value() == 5);
+    CHECK(q.pop().value() == 3);
+    CHECK(q.pop().value() == 1);
+    CHECK(q.empty());
+}
+
+void queue_same_priority_is_fifo() {
+    BlockingQueue<int> q;
+    for (int i = 0; i < 5; ++i) {
+        q.push(Priority::High, i);
+    }
+    for (int i = 0; i < 5; ++i) {
+        CHECK(q.pop().value() == i);
+    }
+}
+
 // ---- ThreadPool ------------------------------------------------------------
 
 void pool_rejects_zero_threads() {
@@ -283,6 +310,114 @@ void pool_status_completed_and_failed() {
     CHECK(wait_until([&] { return pool.get_status(bad) == TaskStatus::Failed; }));
 }
 
+// The priority tests run on a single worker that we deliberately block first,
+// so every task below is sitting in the queue before any of them can run. That
+// makes the dispatch order fully determined by priority instead of by timing.
+struct Gate {
+    ThreadPool& pool;
+    std::atomic<bool> open{false};
+    std::atomic<bool> running{false};
+
+    explicit Gate(ThreadPool& p) : pool(p) {
+        pool.enqueue([this] {
+            running = true;
+            while (!open) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        });
+    }
+    void wait_until_worker_busy() {
+        wait_until([this] { return running.load(); });
+    }
+    void release() { open = true; }
+};
+
+void pool_runs_higher_priority_first() {
+    ThreadPool pool(1);
+    Gate gate(pool);
+    gate.wait_until_worker_busy();
+
+    std::vector<int> order;
+    std::mutex m;
+    auto record = [&](int tag) {
+        return [&, tag] {
+            std::lock_guard<std::mutex> lock(m);
+            order.push_back(tag);
+        };
+    };
+
+    // Submitted lowest-first; expected to run highest-first.
+    pool.enqueue(Priority::Low, record(0));
+    pool.enqueue(Priority::Normal, record(1));
+    pool.enqueue(Priority::High, record(2));
+    pool.enqueue(Priority::Critical, record(3));
+
+    gate.release();
+    CHECK(wait_until([&] {
+        std::lock_guard<std::mutex> lock(m);
+        return order.size() == 4;
+    }));
+    std::lock_guard<std::mutex> lock(m);
+    CHECK((order == std::vector<int>{3, 2, 1, 0}));
+}
+
+void pool_same_priority_runs_in_order() {
+    ThreadPool pool(1);
+    Gate gate(pool);
+    gate.wait_until_worker_busy();
+
+    std::vector<int> order;
+    std::mutex m;
+    for (int i = 0; i < 4; ++i) {
+        pool.enqueue(Priority::High, [&, i] {
+            std::lock_guard<std::mutex> lock(m);
+            order.push_back(i);
+        });
+    }
+
+    gate.release();
+    CHECK(wait_until([&] {
+        std::lock_guard<std::mutex> lock(m);
+        return order.size() == 4;
+    }));
+    std::lock_guard<std::mutex> lock(m);
+    CHECK((order == std::vector<int>{0, 1, 2, 3}));
+}
+
+void pool_mixed_priorities() {
+    ThreadPool pool(1);
+    Gate gate(pool);
+    gate.wait_until_worker_busy();
+
+    std::vector<std::string> order;
+    std::mutex m;
+    auto add = [&](Priority p, std::string name) {
+        pool.enqueue(p, [&, name = std::move(name)] {
+            std::lock_guard<std::mutex> lock(m);
+            order.push_back(name);
+        });
+    };
+
+    add(Priority::Low, "L1");
+    add(Priority::High, "H1");
+    add(Priority::Normal, "N1");
+    add(Priority::Low, "L2");
+    add(Priority::High, "H2");
+
+    gate.release();
+    CHECK(wait_until([&] {
+        std::lock_guard<std::mutex> lock(m);
+        return order.size() == 5;
+    }));
+    std::lock_guard<std::mutex> lock(m);
+    const std::vector<std::string> expected{"H1", "H2", "N1", "L1", "L2"};
+    CHECK((order == expected));
+}
+
+void pool_priority_returns_result() {
+    ThreadPool pool(2);
+    auto f = pool.enqueue(Priority::Critical, [](int a, int b) { return a * b; }, 6, 7);
+    CHECK(f.get() == 42);
+}
+
 }  // namespace
 
 int main() {
@@ -290,6 +425,8 @@ int main() {
     run("queue_try_pop_on_empty", queue_try_pop_on_empty);
     run("queue_close_drains_then_signals", queue_close_drains_then_signals);
     run("queue_blocks_until_pushed", queue_blocks_until_pushed);
+    run("queue_orders_by_priority", queue_orders_by_priority);
+    run("queue_same_priority_is_fifo", queue_same_priority_is_fifo);
     run("pool_rejects_zero_threads", pool_rejects_zero_threads);
     run("pool_runs_void_task", pool_runs_void_task);
     run("pool_returns_result", pool_returns_result);
@@ -306,6 +443,11 @@ int main() {
     run("pool_cancel_queued_task", pool_cancel_queued_task);
     run("pool_cannot_cancel_running_task", pool_cannot_cancel_running_task);
     run("pool_status_completed_and_failed", pool_status_completed_and_failed);
+
+    run("pool_runs_higher_priority_first", pool_runs_higher_priority_first);
+    run("pool_same_priority_runs_in_order", pool_same_priority_runs_in_order);
+    run("pool_mixed_priorities", pool_mixed_priorities);
+    run("pool_priority_returns_result", pool_priority_returns_result);
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

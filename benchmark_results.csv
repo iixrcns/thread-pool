@@ -1,0 +1,9 @@
+scenario,threads,throughput_per_sec,p50_us,p95_us,p99_us
+threadpool,1,648994,587555,822045,856326
+threadpool,2,481502,143458,353897,375066
+threadpool,4,644705,4.137,12.423,21.671
+threadpool,8,588554,1.974,5.431,12.594
+threadpool,12,542519,2.194,6.001,13.265
+std_async,0,72534,0,0,0
+cancellation_success_pct,12,100,0,0,0
+cancel_ops_per_sec,12,2.51998e+07,0,0,0

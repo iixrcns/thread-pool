@@ -47,6 +47,29 @@ The pool does not need an explicit shutdown call. When it goes out of scope the
 destructor closes the queue, lets the workers finish the backlog, and joins
 them.
 
+## Priorities
+
+By default every task runs at `Priority::Normal`. Pass a priority as the first
+argument to push work ahead of or behind the rest:
+
+```cpp
+ThreadPool pool(4);
+
+pool.enqueue([] { background_cleanup(); });                 // Normal
+pool.enqueue(Priority::High, [] { handle_request(); });
+pool.enqueue(Priority::Critical, [] { flush_on_shutdown(); });
+pool.enqueue(Priority::Low, [] { warm_some_cache(); });
+
+// Priority and arguments mix freely; the future works the same way.
+auto sum = pool.enqueue(Priority::High, [](int a, int b) { return a + b; }, 1, 2);
+```
+
+The levels, from first served to last, are `Critical`, `High`, `Normal`,
+`Low`. Tasks at the same level run in the order they were submitted, so raising
+a task's priority never reshuffles its peers. Priority decides dispatch order,
+not preemption: a task already running is never interrupted, so a `Critical`
+task still waits for a free worker.
+
 ## Cancellation
 
 Some work becomes pointless before a worker gets to it - a request times out, a
@@ -93,6 +116,14 @@ that, `pop()` keeps returning queued items until the queue is empty and only the
 reports closure by returning `std::nullopt`. Returning an empty optional instead
 of throwing means the worker loop has no exceptions on its shutdown path.
 
+It is backed by a `std::priority_queue` ordered by priority. The catch is that a
+priority queue is not stable: items of equal priority come out in an unspecified
+order, which would make same-level FIFO a coin toss. To fix that each item also
+carries a sequence number assigned under the lock at push time, and the
+comparator falls back to it on a tie, so equal-priority items drain oldest-first.
+A `push(item)` with no priority lands at `Priority::Normal`, so callers that do
+not care about ordering still see a plain FIFO queue.
+
 `ThreadPool` owns the queue and the worker threads. `enqueue` is where the
 template work happens:
 
@@ -106,8 +137,8 @@ template work happens:
   copy.
 
 Single queue, no work stealing. Tasks are handed to whichever worker wakes
-first, so ordering across threads is not guaranteed. With one worker, tasks run
-in submission order.
+first, so ordering across threads is not guaranteed beyond the priority itself.
+With one worker, tasks run in priority order, oldest-first within a level.
 
 ## Build
 
@@ -126,8 +157,11 @@ Header-only if you prefer: `include/blocking_queue.h` has no dependencies, and
 and non-blocking pops, close-then-drain ordering, argument forwarding, exception
 propagation, move-only results, single-thread ordering, destruction draining
 pending work, a 100k-task stress run, and concurrent submission from several
-threads. The cancellation path adds tests for cancelling a queued task, failing
-to cancel a running one, and reading status through to Completed and Failed.
+threads. Priority ordering is checked at both levels - that the queue drains
+highest-first and stays FIFO within a level, and that the pool dispatches in the
+same order when a single worker is held busy long enough for the tasks to queue
+up. The cancellation path adds tests for cancelling a queued task, failing to
+cancel a running one, and reading status through to Completed and Failed.
 
 The suite also runs clean under ThreadSanitizer:
 
@@ -158,12 +192,14 @@ throughput, speedup over a single thread, and steady-state dispatch latency:
 ```
 
 ```
-threads   tasks/sec          speedup
-1         851375             1.00x
-2         ...                ...x
-4         ...                ...x
+tasks per run        = 2000000
 
-dispatch latency, steady state (us): p50=9.65  p95=11.03  p99=29.08  max=86.24
+threads   tasks/sec          speedup
+1         656904             1.00x
+2         716729             1.09x
+4         650074             0.99x
+8         556007             0.85x
+12        568770             0.87x
 ```
 
 `benchmark_comprehensive` adds a comparison against `std::async(launch::async)`
@@ -175,11 +211,15 @@ on the same workload and a measurement of the cancellation path, then writes a
 ```
 
 ```
-scenario                   threads  throughput/s     p50_us  p95_us  p99_us
-threadpool                 1        1428796          ...     ...     ...
-std_async                  0        59750
-cancellation_success_pct   1        100
-cancel_ops_per_sec         1        14343064
+scenario                   threads  throughput/s     p50_us    p95_us    p99_us   
+threadpool                 1        648994           587554.72 822044.77 856326.48
+threadpool                 2        481502           143457.65 353896.65 375065.63
+threadpool                 4        644705           4.14      12.42     21.67    
+threadpool                 8        588554           1.97      5.43      12.59    
+threadpool                 12       542519           2.19      6.00      13.27    
+std_async                  0        72534            0.00      0.00      0.00     
+cancellation_success_pct   12       100              0.00      0.00      0.00     
+cancel_ops_per_sec         12       25199773         0.00      0.00      0.00   
 ```
 
 The pool reuses its threads, while `std::async` tends to start a new one per
