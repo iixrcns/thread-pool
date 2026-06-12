@@ -1,6 +1,7 @@
 // Comprehensive benchmark suite.
 //
 //   - ThreadPool throughput across thread counts
+//   - ThreadPool dispatch latency (steady-state window)
 //   - ThreadPool vs std::async(launch::async) on the same workload
 //   - cancellation success rate under load
 //
@@ -46,27 +47,57 @@ static void percentiles(std::vector<double>& samples, double& p50, double& p95, 
     p99 = at(0.99);
 }
 
-// ThreadPool: submit `count` empty tasks, time submission through completion,
-// and record per-task latency.
-static void bench_pool(unsigned threads, std::size_t count) {
+// ThreadPool throughput: submit `count` empty tasks and time submission through
+// completion. No per-task latency is collected here because the queue fills
+// faster than it drains at low thread counts, which produces queue-depth
+// latency rather than dispatch latency.
+static void bench_pool_throughput(unsigned threads, std::size_t count) {
     ThreadPool pool(threads);
     std::vector<std::future<void>> futures;
-    std::vector<double> latency(count);
     futures.reserve(count);
 
     auto start = Clock::now();
     for (std::size_t i = 0; i < count; ++i) {
-        auto submitted = Clock::now();
-        futures.push_back(pool.enqueue([i, submitted, &latency] {
-            latency[i] = std::chrono::duration<double, std::micro>(Clock::now() - submitted).count();
-        }));
+        futures.push_back(pool.enqueue([] {}));
     }
     for (auto& f : futures) f.get();
     double elapsed = seconds_since(start);
 
+    g_results.push_back({"threadpool", threads, count / elapsed, 0, 0, 0});
+}
+
+// ThreadPool dispatch latency: measured in a steady-state window of
+// threads * 4 in-flight tasks so the queue never accumulates backlog between
+// submissions. The timestamp is captured immediately before enqueue with no
+// other work between the two calls.
+static void bench_pool_latency(unsigned threads, std::size_t count = 50'000) {
+    ThreadPool pool(threads);
+    const std::size_t window = threads * 4;
+
+    std::vector<double> samples;
+    samples.reserve(count);
+
+    std::vector<std::future<double>> inflight;
+    inflight.reserve(window);
+
+    auto drain_one = [&] {
+        samples.push_back(inflight.front().get());
+        inflight.erase(inflight.begin());
+    };
+
+    for (std::size_t i = 0; i < count; ++i) {
+        auto submitted = Clock::now();
+        inflight.push_back(pool.enqueue([submitted] {
+            return std::chrono::duration<double, std::micro>(
+                Clock::now() - submitted).count();
+        }));
+        if (inflight.size() >= window) drain_one();
+    }
+    while (!inflight.empty()) drain_one();
+
     double p50, p95, p99;
-    percentiles(latency, p50, p95, p99);
-    g_results.push_back({"threadpool", threads, count / elapsed, p50, p95, p99});
+    percentiles(samples, p50, p95, p99);
+    g_results.push_back({"threadpool_latency", threads, 0, p50, p95, p99});
 }
 
 // std::async with the same workload. Each call may spin up a fresh thread, so
@@ -163,19 +194,55 @@ int main(int argc, char** argv) {
 
     std::printf("hardware_concurrency = %u, tasks = %zu\n\n", hw, count);
 
-    bench_pool(1, count);
-    for (unsigned t = 2; t <= hw; t *= 2) bench_pool(t, count);
-    if (hw > 1 && (hw & (hw - 1)) != 0) bench_pool(hw, count);
+    bench_pool_throughput(1, count);
+    bench_pool_latency(1);
+    for (unsigned t = 2; t <= hw; t *= 2) {
+        bench_pool_throughput(t, count);
+        bench_pool_latency(t);
+    }
+    if (hw > 1 && (hw & (hw - 1)) != 0) {
+        bench_pool_throughput(hw, count);
+        bench_pool_latency(hw);
+    }
 
     bench_std_async(count);
     bench_cancellation(hw, 10000);
 
+    // Throughput table.
+    std::printf("Throughput\n");
+    std::printf("%-26s %-8s %-16s\n", "scenario", "threads", "throughput/s");
+    for (const auto& r : g_results) {
+        if (r.scenario == "threadpool") {
+            std::printf("%-26s %-8u %-16.0f\n",
+                        r.scenario.c_str(), r.threads, r.throughput_per_sec);
+        }
+    }
+
+    std::printf("\n");
+
+    // Dispatch latency table.
+    std::printf("Dispatch latency (steady-state window = threads*4)\n");
+    std::printf("%-26s %-8s %-9s %-9s %-9s\n",
+                "scenario", "threads", "p50_us", "p95_us", "p99_us");
+    for (const auto& r : g_results) {
+        if (r.scenario == "threadpool_latency") {
+            std::printf("%-26s %-8u %-9.2f %-9.2f %-9.2f\n",
+                        r.scenario.c_str(), r.threads,
+                        r.p50_us, r.p95_us, r.p99_us);
+        }
+    }
+
+    std::printf("\n");
+
+    // Remaining rows (std_async, cancellation).
     std::printf("%-26s %-8s %-16s %-9s %-9s %-9s\n",
                 "scenario", "threads", "throughput/s", "p50_us", "p95_us", "p99_us");
     for (const auto& r : g_results) {
-        std::printf("%-26s %-8u %-16.0f %-9.2f %-9.2f %-9.2f\n",
-                    r.scenario.c_str(), r.threads, r.throughput_per_sec,
-                    r.p50_us, r.p95_us, r.p99_us);
+        if (r.scenario != "threadpool" && r.scenario != "threadpool_latency") {
+            std::printf("%-26s %-8u %-16.0f %-9.2f %-9.2f %-9.2f\n",
+                        r.scenario.c_str(), r.threads, r.throughput_per_sec,
+                        r.p50_us, r.p95_us, r.p99_us);
+        }
     }
 
     write_csv("benchmark_results.csv");

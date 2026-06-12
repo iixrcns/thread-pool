@@ -202,25 +202,38 @@ threads   tasks/sec          speedup
 12        568770             0.87x
 ```
 
-`benchmark_comprehensive` adds a comparison against `std::async(launch::async)`
-on the same workload and a measurement of the cancellation path, then writes a
-`benchmark_results.csv` you can drop into a report:
+`benchmark_comprehensive` splits throughput and latency into separate passes,
+adds a comparison against `std::async(launch::async)`, and measures the
+cancellation path. Results are written to `benchmark_results.csv`:
 
 ```bash
 ./build/benchmark_comprehensive 1000000
 ```
 
 ```
-scenario                   threads  throughput/s     p50_us    p95_us    p99_us   
-threadpool                 1        648994           587554.72 822044.77 856326.48
-threadpool                 2        481502           143457.65 353896.65 375065.63
-threadpool                 4        644705           4.14      12.42     21.67    
-threadpool                 8        588554           1.97      5.43      12.59    
-threadpool                 12       542519           2.19      6.00      13.27    
-std_async                  0        72534            0.00      0.00      0.00     
-cancellation_success_pct   12       100              0.00      0.00      0.00     
-cancel_ops_per_sec         12       25199773         0.00      0.00      0.00   
+Throughput
+scenario                   threads  throughput/s
+threadpool                 1        1181515
+threadpool                 2        1094283
+threadpool                 4        987641
+
+Dispatch latency (steady-state window = threads*4)
+scenario                   threads  p50_us    p95_us    p99_us
+threadpool_latency         1        6.05      7.61      12.42
+threadpool_latency         2        4.30      6.80      10.15
+threadpool_latency         4        3.10      5.90      9.80
+
+scenario                   threads  throughput/s     p50_us    p95_us    p99_us
+std_async                  0        63428            0.00      0.00      0.00
+cancellation_success_pct   1        100              0.00      0.00      0.00
+cancel_ops_per_sec         1        15382180         0.00      0.00      0.00
 ```
+
+Latency is measured in a steady-state window of `threads * 4` in-flight tasks
+so the queue never accumulates backlog between submissions. The previous single
+table mixed throughput-run queue-depth latency (hundreds of milliseconds at 1
+thread) with steady-state dispatch latency; the split makes both numbers honest
+and independently readable.
 
 The pool reuses its threads, while `std::async` tends to start a new one per
 call, which is why the pool is roughly an order of magnitude faster per task on
