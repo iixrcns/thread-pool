@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <future>
 #include <random>
@@ -77,12 +78,11 @@ static void bench_pool_latency(unsigned threads, std::size_t count = 50'000) {
     std::vector<double> samples;
     samples.reserve(count);
 
-    std::vector<std::future<double>> inflight;
-    inflight.reserve(window);
+    std::deque<std::future<double>> inflight;
 
     auto drain_one = [&] {
         samples.push_back(inflight.front().get());
-        inflight.erase(inflight.begin());
+        inflight.pop_front();
     };
 
     for (std::size_t i = 0; i < count; ++i) {
