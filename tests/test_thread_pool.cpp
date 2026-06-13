@@ -310,6 +310,53 @@ void pool_status_completed_and_failed() {
     CHECK(wait_until([&] { return pool.get_status(bad) == TaskStatus::Failed; }));
 }
 
+void pool_prune_removes_terminal_entries() {
+    ThreadPool pool(4);
+    const std::size_t count = 100;
+    std::vector<TaskId> ids;
+    ids.reserve(count);
+
+    for (std::size_t i = 0; i < count; ++i) {
+        ids.push_back(pool.enqueue_cancellable([] {}));
+    }
+
+    // Wait until every task has reached its terminal Completed status before
+    // pruning, so the count is deterministic.
+    CHECK(wait_until([&] {
+        for (TaskId id : ids) {
+            if (pool.get_status(id) != TaskStatus::Completed) return false;
+        }
+        return true;
+    }));
+
+    std::size_t removed = pool.prune();
+    CHECK(removed == count);
+    CHECK(pool.get_status(ids[0]) == TaskStatus::Unknown);
+    CHECK(pool.get_status(ids[99]) == TaskStatus::Unknown);
+}
+
+void pool_prune_keeps_queued_entries() {
+    ThreadPool pool(1);  // single worker so the second task stays queued
+    std::atomic<bool> blocker_started{false};
+    std::atomic<bool> release{false};
+
+    // Occupy the only worker so the cancellable task below cannot start.
+    pool.enqueue([&] {
+        blocker_started = true;
+        while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    CHECK(wait_until([&] { return blocker_started.load(); }));
+
+    TaskId id = pool.enqueue_cancellable([] {});
+    CHECK(pool.get_status(id) == TaskStatus::Queued);
+
+    std::size_t removed = pool.prune();
+    CHECK(removed == 0u);
+    CHECK(pool.get_status(id) == TaskStatus::Queued);
+
+    release = true;
+}
+
 // The priority tests run on a single worker that we deliberately block first,
 // so every task below is sitting in the queue before any of them can run. That
 // makes the dispatch order fully determined by priority instead of by timing.
@@ -443,6 +490,8 @@ int main() {
     run("pool_cancel_queued_task", pool_cancel_queued_task);
     run("pool_cannot_cancel_running_task", pool_cannot_cancel_running_task);
     run("pool_status_completed_and_failed", pool_status_completed_and_failed);
+    run("pool_prune_removes_terminal_entries", pool_prune_removes_terminal_entries);
+    run("pool_prune_keeps_queued_entries", pool_prune_keeps_queued_entries);
 
     run("pool_runs_higher_priority_first", pool_runs_higher_priority_first);
     run("pool_same_priority_runs_in_order", pool_same_priority_runs_in_order);

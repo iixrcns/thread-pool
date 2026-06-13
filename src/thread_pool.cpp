@@ -95,3 +95,20 @@ TaskStatus ThreadPool::get_status(TaskId id) const {
     }
     return it->second->status.load();
 }
+
+std::size_t ThreadPool::prune() {
+    std::lock_guard<std::mutex> lock(controls_mutex_);
+    std::size_t removed = 0;
+    for (auto it = controls_.begin(); it != controls_.end(); ) {
+        const TaskStatus s = it->second->status.load(std::memory_order_relaxed);
+        if (s == TaskStatus::Completed ||
+            s == TaskStatus::Cancelled ||
+            s == TaskStatus::Failed) {
+            it = controls_.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}

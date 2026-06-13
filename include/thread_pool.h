@@ -69,6 +69,15 @@ public:
 
     TaskStatus get_status(TaskId id) const;
 
+    // Removes every entry from the cancellation table whose status is terminal
+    // (Completed, Cancelled, or Failed). Entries for tasks that are still
+    // Queued or Running are left in place, since their Control is still
+    // referenced by the queued lambda.
+    //
+    // Thread-safe and safe to call from any thread while workers are active.
+    // Returns the number of entries removed.
+    std::size_t prune();
+
     std::size_t thread_count() const { return workers_.size(); }
     std::size_t pending() const { return tasks_.size(); }
 

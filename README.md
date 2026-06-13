@@ -101,10 +101,11 @@ compare-and-swap. Exactly one wins, so a task is never half-cancelled and never
 runs twice. A cancelled task stays in the queue and is skipped when a worker
 reaches it, which keeps `cancel` O(1).
 
-One trade-off worth naming: the status table keeps an entry per cancellable task
-for the life of the pool, so `get_status` works after a task finishes. A pool
-that submits an unbounded stream of cancellable tasks would want that table
-pruned or a handle-based API instead.
+The status table keeps an entry per cancellable task so `get_status` still works
+after a task finishes. Completed, cancelled, and failed entries stay in the table
+until `prune()` is called. For a long-running pool with a continuous stream of
+cancellable tasks, call `prune()` periodically to reclaim that memory; it removes
+every terminal entry and leaves Queued and Running tasks untouched.
 
 ## Design
 
