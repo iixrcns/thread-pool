@@ -1,7 +1,6 @@
-#ifndef THREAD_POOL_BLOCKING_QUEUE_H
-#define THREAD_POOL_BLOCKING_QUEUE_H
+#ifndef THREAD_POOL_LOCAL_QUEUE_H
+#define THREAD_POOL_LOCAL_QUEUE_H
 
-#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -18,52 +17,38 @@ enum class Priority {
     Critical = 3,
 };
 
-// A multi-producer / multi-consumer queue ordered by priority, falling back to
-// FIFO within a single priority level.
+// A single worker's queue: a priority queue guarded by one mutex, with
+// non-blocking access only. It keeps the same priority + sequence ordering the
+// single shared queue used to have, but the blocking and close logic is gone -
+// sleeping is the pool's job now, coordinated across all queues at once.
 //
-// Consumers call pop() and block until an item is available. Once close() is
-// called the queue stops accepting work: pending items are still drained, but
-// pop() on an empty closed queue reports closure instead of blocking forever.
+// The owner pops from it with try_pop(); other workers reach into it with
+// steal(). For this locked design the two are the same operation; they are kept
+// separate so the call sites read clearly and so a future lock-free queue can
+// hand the owner and the thieves opposite ends without touching callers.
 //
 // push(item) without a priority is treated as Priority::Normal, so code that
 // does not care about ordering sees a plain FIFO queue.
 template <typename T>
-class BlockingQueue {
+class LocalQueue {
 public:
-    BlockingQueue() = default;
+    LocalQueue() = default;
 
-    BlockingQueue(const BlockingQueue&) = delete;
-    BlockingQueue& operator=(const BlockingQueue&) = delete;
+    LocalQueue(const LocalQueue&) = delete;
+    LocalQueue& operator=(const LocalQueue&) = delete;
 
     void push(T item) {
         push(Priority::Normal, std::move(item));
     }
 
     void push(Priority priority, T item) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            // seq is assigned under the lock so two items pushed at the same
-            // priority keep the order their producers reached the queue in.
-            queue_.push(Entry{priority, next_seq_++, std::move(item)});
-        }
-        // Wake a single waiter outside the lock so it does not immediately
-        // contend on the mutex we still hold.
-        not_empty_.notify_one();
+        std::lock_guard<std::mutex> lock(mutex_);
+        // seq is assigned under the lock so two items pushed at the same
+        // priority keep the order their producers reached the queue in.
+        queue_.push(Entry{priority, next_seq_++, std::move(item)});
     }
 
-    // Blocks until an item is ready or the queue is closed and empty.
-    // Returns std::nullopt only in the latter case.
-    std::optional<T> pop() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        not_empty_.wait(lock, [this] { return !queue_.empty() || closed_; });
-
-        if (queue_.empty()) {
-            return std::nullopt;  // closed and drained
-        }
-        return take_top();
-    }
-
-    // Non-blocking variant. Returns std::nullopt if nothing is queued.
+    // Returns std::nullopt if nothing is queued, otherwise the top item.
     std::optional<T> try_pop() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (queue_.empty()) {
@@ -72,17 +57,12 @@ public:
         return take_top();
     }
 
-    void close() {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            closed_ = true;
-        }
-        not_empty_.notify_all();
-    }
-
-    bool is_closed() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return closed_;
+    // Identical to try_pop() for the locked queue. A thief calls this instead so
+    // the worker loop reads the way the algorithm is described, and so the
+    // lock-free follow-up can take from the far end here without a call-site
+    // change.
+    std::optional<T> steal() {
+        return try_pop();
     }
 
     std::size_t size() const {
@@ -128,8 +108,6 @@ private:
     std::priority_queue<Entry, std::vector<Entry>, ServedLater> queue_;
     std::uint64_t next_seq_ = 0;
     mutable std::mutex mutex_;
-    std::condition_variable not_empty_;
-    bool closed_ = false;
 };
 
-#endif  // THREAD_POOL_BLOCKING_QUEUE_H
+#endif  // THREAD_POOL_LOCAL_QUEUE_H
